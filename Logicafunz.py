@@ -47,6 +47,14 @@ def serializza_mnote(left, right):
     }
     return MNOTE_MAGIC + "\n" + json.dumps(payload, ensure_ascii=False, indent=2)
 
+def scrivi_mnote(path, left, right):
+    """Serializza e scrive su disco un file .mnote in un solo passo."""
+    scrivi_nota(path, serializza_mnote(left, right))
+
+def leggi_mnote(path):
+    """Legge un file .mnote da disco e lo deserializza già in (left, right)."""
+    return parse_mnote(leggi_nota(path))
+
 def parse_mnote(data):
     """
     Ritorna (left_dict, right_dict) dove ogni dict ha 'text' e 'ranges'.

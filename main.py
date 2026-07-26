@@ -3,16 +3,22 @@ from tkinter import filedialog, messagebox, scrolledtext, font as tkfont, ttk, c
 from markdowncompiler import compila_markdown
 import Logicafunz
 import Scorciatoie
+import SceltaFile
 import os
 import platform
+import re
 import tempfile
 import webbrowser
 
 
-# Tag booleani "semplici" (non toccano il font)
+# Tag booleani (non toccano il font)
 SIMPLE_TAGS = ("underline", "strike", "highlight")
 ALIGN_TAGS = ("align_left", "align_center", "align_right")
 SCRIPT_TAGS = ("superscript", "subscript")   # apice / pedice
+
+# Pattern per il riconoscimento delle righe negli elenchi
+BULLET_RE = re.compile(r"^(\s*)-\s+")
+NUMBERED_RE = re.compile(r"^(\s*)\d+\.\s+")
 
 # Catalogo caratteri speciali  { "Categoria": ["char", ...] }
 SPECIAL_CHARS = {
@@ -119,6 +125,25 @@ THEME_DARK = {
 
 
 class MorNoteGUI:
+    @staticmethod
+    def _get_home_dir():
+        """
+        Ritorna la home dell'utente corrente da usare come cartella di
+        partenza nei dialog Apri/Salva, indipendentemente da chi sta
+        eseguendo lo script o da come si chiama.
+        """
+        home = os.path.expanduser("~")
+        if os.path.isdir(home):
+            return home
+        try:
+            import getpass
+            candidate = f"/home/{getpass.getuser()}"
+            if os.path.isdir(candidate):
+                return candidate
+        except Exception:
+            pass
+        return os.getcwd()
+
     def __init__(self, root):
         self.root = root
         self.root.title("MorNote")
@@ -129,6 +154,20 @@ class MorNoteGUI:
         self.modified = False
         self._dark_mode = False
         self._theme_widgets = []   # lista di (widget, ruolo) da ricolorare
+        self._last_dir = self._get_home_dir()  # cartella iniziale/ultima usata nei dialog
+
+        # Formattazione "sticky": stile scelto senza selezione, che verrà
+        # applicato ai caratteri che l'utente sta per digitare.
+        self._typing_format = {
+            "bold": False, "italic": False, "underline": False, "strike": False,
+            "highlight": None, "color": None, "family": None, "size": None,
+        }
+        # Posizione del cursore nel momento in cui è stato impostato uno
+        # sticky format da toolbar/menu (senza selezione). Se il cursore
+        # non si è mosso da lì, un click "di rientro" nell'editor (per
+        # esempio dopo aver usato una combobox) non deve resettare lo
+        # sticky format appena scelto.
+        self._sticky_anchor = None   # (editor, index) | None
 
         # massimizza
         try:
@@ -176,6 +215,9 @@ class MorNoteGUI:
         menu_formato.add_command(label="Centra",            command=lambda: self.set_align("align_center"))
         menu_formato.add_command(label="Allinea a destra",  command=lambda: self.set_align("align_right"))
         menu_formato.add_separator()
+        menu_formato.add_command(label="Elenco puntato", command=self.toggle_bullet_list)
+        menu_formato.add_command(label="Elenco numerato", command=self.toggle_numbered_list)
+        menu_formato.add_separator()
         menu_formato.add_command(label="Rimuovi formattazione", command=self.clear_formatting)
         menubar.add_cascade(label="Formato", menu=menu_formato)
 
@@ -207,18 +249,16 @@ class MorNoteGUI:
         size_cb.pack(side=tk.LEFT, padx=4, pady=3)
         size_cb.bind("<ButtonPress-1>", lambda e: self._save_selection())
         size_cb.bind("<<ComboboxSelected>>", lambda e: self.apply_font_size())
-        size_cb.bind("Button-1", lambda e: "break")
-        size_cb.bind("<ButtonRelease-1>", lambda e: self.apply_font_size())
 
         def sep():
             tk.Frame(toolbar, width=2, bg="#bbb").pack(side=tk.LEFT, fill=tk.Y, padx=4, pady=4)
 
         sep()
-        btn_b = tk.Button(toolbar, text="B", width=2, font=("TkDefaultFont", 10, "bold"),   command=self.bold_text)
-        btn_i = tk.Button(toolbar, text="I", width=2, font=("TkDefaultFont", 10, "italic"),  command=self.italic_text)
-        btn_u = tk.Button(toolbar, text="U", width=2, font=("TkDefaultFont", 10, "underline"), command=self.underline_text)
-        btn_s = tk.Button(toolbar, text="S", width=2, font=("TkDefaultFont", 10, "overstrike"), command=self.strike_text)
-        for b in (btn_b, btn_i, btn_u, btn_s):
+        self.btn_b = tk.Button(toolbar, text="B", width=2, font=("TkDefaultFont", 10, "bold"),   command=self.bold_text)
+        self.btn_i = tk.Button(toolbar, text="I", width=2, font=("TkDefaultFont", 10, "italic"),  command=self.italic_text)
+        self.btn_u = tk.Button(toolbar, text="U", width=2, font=("TkDefaultFont", 10, "underline"), command=self.underline_text)
+        self.btn_s = tk.Button(toolbar, text="S", width=2, font=("TkDefaultFont", 10, "overstrike"), command=self.strike_text)
+        for b in (self.btn_b, self.btn_i, self.btn_u, self.btn_s):
             b.pack(side=tk.LEFT, padx=1)
             self._theme_widgets.append((b, "button"))
 
@@ -229,6 +269,13 @@ class MorNoteGUI:
         # Colore testo con palette
         self._build_color_menu(toolbar, "A▾", TEXT_COLOR_PALETTE,
                                self.apply_text_color, self.remove_text_color, "Colore testo")
+
+        sep()
+        btn_bullet = tk.Button(toolbar, text="•≡", width=3, command=self.toggle_bullet_list)
+        btn_numlist = tk.Button(toolbar, text="1≡", width=3, command=self.toggle_numbered_list)
+        for b in (btn_bullet, btn_numlist):
+            b.pack(side=tk.LEFT, padx=1)
+            self._theme_widgets.append((b, "button"))
 
         sep()
         btn_al = tk.Button(toolbar, text="⟸", width=2, command=lambda: self.set_align("align_left"))
@@ -307,12 +354,20 @@ class MorNoteGUI:
         self._saved_sel = None   # (start, end) | None
         self._saved_ed  = None   # editor a cui appartiene la selezione
 
+        # tasti di navigazione dopo i quali lo stile attivo va risincronizzato
+        # sul testo circostante al cursore (comportamento tipo Word)
+        NAV_KEYSYMS = ("Left", "Right", "Up", "Down", "Home", "End", "Prior", "Next")
+
         self._last_focus = self.editor_left
         for ed in (self.editor_left, self.editor_right):
             ed.bind("<FocusIn>", self._on_focus_in)
             ed.bind("<KeyRelease>", self._on_key_release)
-            ed.bind("<ButtonRelease>", self.update_status)
+            ed.bind("<ButtonRelease>", self._on_button_release)
+            ed.bind("<Return>", self._on_return_key)
+            for keysym in NAV_KEYSYMS:
+                ed.bind(f"<KeyRelease-{keysym}>", self._on_cursor_nav)
             self._setup_tags(ed)
+            self._setup_typing_format_proxy(ed)
 
         # status bar
         self.status = tk.Label(self.root, text="Pronto", anchor="w", relief=tk.SUNKEN)
@@ -355,9 +410,129 @@ class MorNoteGUI:
     def _on_focus_in(self, event):
         self._last_focus = event.widget
 
+    def _on_return_key(self, event):
+        """Se il cursore è su una riga di elenco (puntato o numerato),
+        Invio continua l'elenco sulla riga successiva senza bisogno di
+        ripremere il pulsante ogni volta. Invio su una riga di elenco
+        vuota (solo il prefisso, nessun contenuto) esce dall'elenco
+        rimuovendo il prefisso, invece di continuarlo all'infinito."""
+        ed = event.widget
+        if ed not in (self.editor_left, self.editor_right):
+            return None
+
+        try:
+            insert_idx = ed.index("insert")
+        except tk.TclError:
+            return None
+
+        line_no = int(insert_idx.split(".")[0])
+        line_start = f"{line_no}.0"
+        line_text = ed.get(line_start, f"{line_no}.end")
+
+        m_bul = BULLET_RE.match(line_text)
+        m_num = NUMBERED_RE.match(line_text)
+        if not (m_bul or m_num):
+            return None  # riga normale: comportamento di default di Tk
+
+        prefix = (m_bul or m_num).group(0)
+        resto = line_text[len(prefix):]
+
+        if resto.strip() == "":
+            # riga di elenco vuota: Invio esce dall'elenco invece di continuarlo
+            ed.delete(line_start, f"{line_start}+{len(prefix)}c")
+            self.modified = True
+            self.update_status()
+            return "break"
+
+        ed.insert("insert", "\n")
+        if m_bul:
+            nuovo_prefix = "- "
+        else:
+            num_match = re.match(r"^\s*(\d+)\.", line_text)
+            n = int(num_match.group(1)) + 1 if num_match else 1
+            nuovo_prefix = f"{n}. "
+        ed.insert("insert", nuovo_prefix)
+
+        self.modified = True
+        self.update_status()
+        return "break"
+
     def _on_key_release(self, event=None):
         self.modified = True
         self.update_status(event)
+
+    def _on_button_release(self, event=None):
+        """Click del mouse: aggiorna status bar e stile attivo sul nuovo punto del cursore."""
+        self.update_status(event)
+        if event is not None:
+            self._sync_typing_format_from_cursor(event.widget)
+
+    def _on_cursor_nav(self, event=None):
+        """Frecce/Home/End/PageUp/PageDown: il cursore si è spostato senza
+        digitare, quindi risincronizza lo stile attivo sul nuovo punto."""
+        self.update_status(event)
+        if event is not None:
+            self._sync_typing_format_from_cursor(event.widget)
+
+    def _sync_typing_format_from_cursor(self, ed):
+        """Aggiorna typing_format e toolbar (bottoni B/I/U/S, font, dimensione)
+        in base al testo subito a sinistra del cursore, così muovendosi nel
+        documento lo stile 'attivo' segue sempre il punto in cui ci si trova,
+        come in Word. Non viene chiamata durante la digitazione normale, per
+        non entrare in conflitto con lo sticky-format già in uso mentre si scrive.
+        """
+        try:
+            insert_idx = ed.index("insert")
+        except tk.TclError:
+            return
+
+        anchor = self._sticky_anchor
+        if anchor is not None and anchor[0] is ed and anchor[1] == insert_idx:
+            # Il cursore è ancora nello stesso punto in cui è stato impostato
+            # lo sticky format: questo click è solo un "rientro" nell'editor
+            # per riprendere a scrivere, non uno spostamento reale. Non
+            # sovrascrivere lo stile appena scelto dall'utente.
+            return
+        self._sticky_anchor = None
+
+        # Riferimento: il carattere subito a sinistra del cursore; a inizio
+        # documento (nessun carattere a sinistra) usa la posizione stessa.
+        if ed.compare(insert_idx, ">", "1.0"):
+            ref_idx = ed.index(f"{insert_idx} -1c")
+        else:
+            ref_idx = insert_idx
+
+        family, size, bold, italic = self._get_char_attrs(ed, ref_idx)
+        tags_at = ed.tag_names(ref_idx)
+
+        self._typing_format["bold"] = bold
+        self._typing_format["italic"] = italic
+        self._typing_format["underline"] = "underline" in tags_at
+        self._typing_format["strike"] = "strike" in tags_at
+
+        highlight = None
+        for t in tags_at:
+            if t.startswith("hl_"):
+                highlight = t[3:]
+                break
+            if t == "highlight":
+                highlight = "#fff59d"
+                break
+        self._typing_format["highlight"] = highlight
+
+        color = None
+        for t in tags_at:
+            if t.startswith("col_"):
+                color = t[4:]
+                break
+        self._typing_format["color"] = color
+
+        self._typing_format["family"] = family
+        self._typing_format["size"] = size
+
+        self._update_format_buttons()
+        self.font_family_var.set(family)
+        self.font_size_var.set(size)
 
     # ============================================================
     # TEMA SCURO / CHIARO
@@ -413,6 +588,110 @@ class MorNoteGUI:
         sub_font = tkfont.Font(family=DEFAULT_FAMILY, size=int(DEFAULT_SIZE * 0.7))
         editor.tag_configure("superscript", offset=6,  font=sup_font)
         editor.tag_configure("subscript",   offset=-4, font=sub_font)
+
+    # ============================================================
+    # FORMATTAZIONE "STICKY" (senza selezione)
+    #   Intercetta ogni inserimento di testo nel widget (proxy Tcl) e,
+    #   se lo stile è stato attivato senza selezionare nulla, lo applica
+    #   automaticamente al testo appena digitato.
+    # ============================================================
+    def _setup_typing_format_proxy(self, ed):
+        orig_name = ed._w + "_orig"
+        ed.tk.call("rename", ed._w, orig_name)
+        ed.tk.createcommand(
+            ed._w, lambda *args, ed=ed, orig=orig_name: self._text_proxy(ed, orig, *args)
+        )
+
+    def _text_proxy(self, ed, orig_name, *args):
+        is_cursor_insert = (
+            args and args[0] == "insert" and len(args) >= 3 and args[1] == "insert"
+        )
+
+        try:
+            result = ed.tk.call((orig_name,) + args)
+        except tk.TclError as e:
+            # Il widget Text invoca sé stesso internamente per moltissime
+            # operazioni di bookkeeping (es. verificare lo stato del tag
+            # "sel" quando gli indici si spostano durante un insert/delete).
+            # Normalmente Tk gestisce questi errori "benigni" senza farli
+            # risalire: qui, essendo passati dal nostro proxy Python, vanno
+            # ignorati allo stesso modo, altrimenti crashano il mainloop.
+            # Facciamo eccezione solo per un vero inserimento al cursore,
+            # dove un fallimento è un problema reale che vogliamo vedere.
+            if is_cursor_insert:
+                raise
+            return ""
+
+        # Applica lo stile sticky solo quando il testo viene digitato/incollato
+        # nella normale posizione del cursore (non per inserimenti "tecnici"
+        # come il caricamento di un file o l'inserimento di un carattere speciale
+        # in un punto arbitrario del documento).
+        if is_cursor_insert:
+            text = args[2]
+            if text:
+                try:
+                    end_index = ed.index("insert")
+                    start_index = ed.index(f"{end_index} - {len(text)}c")
+                    self._apply_typing_format(ed, start_index, end_index)
+                except tk.TclError:
+                    pass
+
+        return result
+
+    def _apply_typing_format(self, ed, start, end):
+        pf = self._typing_format
+        if pf["bold"] or pf["italic"] or pf["family"] or pf["size"]:
+            self._apply_attrs_to_range(
+                ed, start, end,
+                bold=pf["bold"],
+                italic=pf["italic"],
+                family=pf["family"],
+                size=pf["size"],
+            )
+        if pf["underline"]:
+            ed.tag_add("underline", start, end)
+        if pf["strike"]:
+            ed.tag_add("strike", start, end)
+        if pf["highlight"]:
+            tag = f"hl_{pf['highlight']}"
+            if tag not in ed.tag_names():
+                ed.tag_configure(tag, background=pf["highlight"])
+            ed.tag_add(tag, start, end)
+        if pf["color"]:
+            tag = f"col_{pf['color']}"
+            if tag not in ed.tag_names():
+                ed.tag_configure(tag, foreground=pf["color"])
+            ed.tag_add(tag, start, end)
+
+    def _update_format_buttons(self):
+        """Mostra visivamente quali stili sticky sono attivi (bottone premuto)."""
+        mapping = {
+            "bold": getattr(self, "btn_b", None),
+            "italic": getattr(self, "btn_i", None),
+            "underline": getattr(self, "btn_u", None),
+            "strike": getattr(self, "btn_s", None),
+        }
+        for key, btn in mapping.items():
+            if btn is None:
+                continue
+            try:
+                btn.configure(relief=tk.SUNKEN if self._typing_format.get(key) else tk.RAISED)
+            except tk.TclError:
+                pass
+
+    def _set_sticky_anchor(self, ed):
+        """Ricorda dove si trova il cursore quando viene impostato uno
+        sticky format da toolbar/menu senza selezione, così un click di
+        rientro nello stesso punto non lo cancella (vedi _sync_typing_format_from_cursor)."""
+        try:
+            self._sticky_anchor = (ed, ed.index("insert"))
+        except tk.TclError:
+            self._sticky_anchor = None
+
+    def _reset_typing_format(self):
+        for k in self._typing_format:
+            self._typing_format[k] = False if k in ("bold", "italic", "underline", "strike") else None
+        self._update_format_buttons()
 
     # ============================================================
     # SISTEMA FONT COMPOSITO
@@ -493,14 +772,25 @@ class MorNoteGUI:
             self._saved_ed  = None
 
     def _selection_range(self, ed):
-        # Prima prova la selezione live
+        # Prima prova la selezione live. Su alcune build di Tk il tag "sel"
+        # può restare presente con lunghezza zero (start == end) dopo un
+        # semplice click senza trascinamento: non è una selezione reale,
+        # quindi va trattata come "nessuna selezione" o il ramo sticky non
+        # scatterebbe mai.
         try:
-            return ed.index("sel.first"), ed.index("sel.last")
+            first, last = ed.index("sel.first"), ed.index("sel.last")
+            if first and last and ed.compare(first, "<", last):
+                return first, last
         except tk.TclError:
             pass
         # Fallback: selezione salvata (può succedere quando il Combobox ha il focus)
         if self._saved_sel and self._saved_ed is ed:
-            return self._saved_sel
+            s, e = self._saved_sel
+            try:
+                if ed.compare(s, "<", e):
+                    return self._saved_sel
+            except tk.TclError:
+                pass
         return None
 
     def _attr_active_in_selection(self, ed, start, end, attr_idx):
@@ -517,7 +807,13 @@ class MorNoteGUI:
     def bold_text(self):
         ed = self.focused_editor()
         sel = self._selection_range(ed)
-        if not sel: return
+        if not sel:
+            self._typing_format["bold"] = not self._typing_format["bold"]
+            self._set_sticky_anchor(ed)
+            self._update_format_buttons()
+            stato = "attivo" if self._typing_format["bold"] else "disattivato"
+            self._flash_status(f"Grassetto {stato} per il testo che scriverai.")
+            return
         start, end = sel
         new_val = not self._attr_active_in_selection(ed, start, end, 2)
         self._apply_attrs_to_range(ed, start, end, bold=new_val)
@@ -525,7 +821,13 @@ class MorNoteGUI:
     def italic_text(self):
         ed = self.focused_editor()
         sel = self._selection_range(ed)
-        if not sel: return
+        if not sel:
+            self._typing_format["italic"] = not self._typing_format["italic"]
+            self._set_sticky_anchor(ed)
+            self._update_format_buttons()
+            stato = "attivo" if self._typing_format["italic"] else "disattivato"
+            self._flash_status(f"Corsivo {stato} per il testo che scriverai.")
+            return
         start, end = sel
         new_val = not self._attr_active_in_selection(ed, start, end, 3)
         self._apply_attrs_to_range(ed, start, end, italic=new_val)
@@ -534,6 +836,9 @@ class MorNoteGUI:
         ed = self._saved_ed or self.focused_editor()
         sel = self._selection_range(ed)
         if not sel:
+            self._typing_format["family"] = self.font_family_var.get()
+            self._set_sticky_anchor(ed)
+            self._flash_status(f"Font '{self.font_family_var.get()}' attivo per il testo che scriverai.")
             return
         self._apply_attrs_to_range(ed, sel[0], sel[1], family=self.font_family_var.get())
         self._saved_sel = None
@@ -542,6 +847,9 @@ class MorNoteGUI:
         ed = self._saved_ed or self.focused_editor()
         sel = self._selection_range(ed)
         if not sel:
+            self._typing_format["size"] = self.font_size_var.get()
+            self._set_sticky_anchor(ed)
+            self._flash_status(f"Dimensione {self.font_size_var.get()} attiva per il testo che scriverai.")
             return
         start, end = sel
         new_size = self.font_size_var.get()
@@ -563,7 +871,14 @@ class MorNoteGUI:
     def _toggle_simple(self, tag):
         ed = self.focused_editor()
         sel = self._selection_range(ed)
-        if not sel: return
+        if not sel:
+            self._typing_format[tag] = not self._typing_format[tag]
+            self._set_sticky_anchor(ed)
+            self._update_format_buttons()
+            nome = "Sottolineato" if tag == "underline" else "Barrato"
+            stato = "attivo" if self._typing_format[tag] else "disattivato"
+            self._flash_status(f"{nome} {stato} per il testo che scriverai.")
+            return
         start, end = sel
         if tag in ed.tag_names(start):
             ed.tag_remove(tag, start, end)
@@ -690,7 +1005,12 @@ class MorNoteGUI:
     def apply_highlight(self, color):
         ed = self.focused_editor()
         sel = self._selection_range(ed)
-        if not sel: return
+        if not sel:
+            self._typing_format["highlight"] = None if self._typing_format["highlight"] == color else color
+            self._set_sticky_anchor(ed)
+            stato = "disattivato" if self._typing_format["highlight"] is None else "attivo"
+            self._flash_status(f"Evidenziatore {stato} per il testo che scriverai.")
+            return
         start, end = sel
         tag = f"hl_{color}"
         if tag not in ed.tag_names():
@@ -706,7 +1026,11 @@ class MorNoteGUI:
     def remove_highlight(self):
         ed = self.focused_editor()
         sel = self._selection_range(ed)
-        if not sel: return
+        if not sel:
+            self._typing_format["highlight"] = None
+            self._set_sticky_anchor(ed)
+            self._flash_status("Evidenziatore disattivato per il testo che scriverai.")
+            return
         start, end = sel
         for t in ed.tag_names():
             if t.startswith("hl_") or t == "highlight":
@@ -717,7 +1041,12 @@ class MorNoteGUI:
     def apply_text_color(self, color):
         ed = self.focused_editor()
         sel = self._selection_range(ed)
-        if not sel: return
+        if not sel:
+            self._typing_format["color"] = None if self._typing_format["color"] == color else color
+            self._set_sticky_anchor(ed)
+            stato = "disattivato" if self._typing_format["color"] is None else "attivo"
+            self._flash_status(f"Colore testo {stato} per il testo che scriverai.")
+            return
         start, end = sel
         tag = f"col_{color}"
         if tag not in ed.tag_names():
@@ -731,7 +1060,11 @@ class MorNoteGUI:
     def remove_text_color(self):
         ed = self.focused_editor()
         sel = self._selection_range(ed)
-        if not sel: return
+        if not sel:
+            self._typing_format["color"] = None
+            self._set_sticky_anchor(ed)
+            self._flash_status("Colore testo disattivato per il testo che scriverai.")
+            return
         start, end = sel
         for t in ed.tag_names():
             if t.startswith("col_"):
@@ -762,20 +1095,101 @@ class MorNoteGUI:
         self.modified = True
 
     # ============================================================
+    # ELENCHI (puntati / numerati)
+    #   Le righe vengono marcate a livello di testo con "- " (bullet,
+    #   compatibile con markdowncompiler) o "N. " (numerato), così i
+    #   file .md prodotti mantengono le liste anche fuori da MorNote.
+    # ============================================================
+    def _selected_line_numbers(self, ed):
+        try:
+            start_raw = ed.index("sel.first")
+            end_raw = ed.index("sel.last")
+            if not start_raw or not end_raw:
+                raise tk.TclError("nessuna selezione")
+            start_line = int(start_raw.split(".")[0])
+            end_line = int(end_raw.split(".")[0])
+            # Se la selezione finisce esattamente a inizio riga senza
+            # includere alcun carattere di quella riga, non la contiamo.
+            if end_raw.split(".")[1] == "0" and end_line > start_line:
+                end_line -= 1
+        except (tk.TclError, ValueError):
+            start_line = end_line = int(ed.index("insert").split(".")[0])
+        return list(range(start_line, end_line + 1))
+
+    def toggle_bullet_list(self):
+        ed = self.focused_editor()
+        lines = self._selected_line_numbers(ed)
+        if not lines: return
+
+        first_text = ed.get(f"{lines[0]}.0", f"{lines[0]}.end")
+        turn_off = bool(BULLET_RE.match(first_text))
+
+        for n in lines:
+            line_start = f"{n}.0"
+            text = ed.get(line_start, f"{n}.end")
+            if turn_off:
+                m = BULLET_RE.match(text)
+                if m:
+                    ed.delete(line_start, f"{line_start}+{len(m.group(0))}c")
+            else:
+                m_bul = BULLET_RE.match(text)
+                if m_bul:
+                    continue  # già puntata
+                m_num = NUMBERED_RE.match(text)
+                if m_num:
+                    ed.delete(line_start, f"{line_start}+{len(m_num.group(0))}c")
+                ed.insert(line_start, "- ")
+
+        self.modified = True
+        self.update_status()
+
+    def toggle_numbered_list(self):
+        ed = self.focused_editor()
+        lines = self._selected_line_numbers(ed)
+        if not lines: return
+
+        first_text = ed.get(f"{lines[0]}.0", f"{lines[0]}.end")
+        turn_off = bool(NUMBERED_RE.match(first_text))
+        counter = 1
+
+        for n in lines:
+            line_start = f"{n}.0"
+            text = ed.get(line_start, f"{n}.end")
+            if turn_off:
+                m = NUMBERED_RE.match(text)
+                if m:
+                    ed.delete(line_start, f"{line_start}+{len(m.group(0))}c")
+            else:
+                m_bul = BULLET_RE.match(text)
+                if m_bul:
+                    ed.delete(line_start, f"{line_start}+{len(m_bul.group(0))}c")
+                    text = ed.get(line_start, f"{n}.end")
+                m_num = NUMBERED_RE.match(text)
+                if m_num:
+                    ed.delete(line_start, f"{line_start}+{len(m_num.group(0))}c")
+                ed.insert(line_start, f"{counter}. ")
+                counter += 1
+
+        self.modified = True
+        self.update_status()
+
+    # ============================================================
     # Nuovo / Apri / Salva
     # ============================================================
     def nuovo_file(self):
         self.root.after(100, self._nuovo_file_dialog)
 
     def _nuovo_file_dialog(self):
-        path = filedialog.asksaveasfilename(
-            parent=self.root,
-            title="Crea nuovo file", defaultextension=".mnote",
+        path = SceltaFile.chiedi_file_salvataggio(
+            self.root, self._last_dir,
             filetypes=[("MorNote", "*.mnote"), ("Markdown", "*.md"),
                        ("HTML", "*.html"), ("Testo", "*.txt"), ("Tutti i file", "*.*")],
+            defaultextension=".mnote",
+            title="Crea nuovo file",
         )
         if not path: return
         self.path = path
+        self._last_dir = os.path.dirname(path) or self._last_dir
         self.file_ext = os.path.splitext(path)[1].lower()
 
         if self.file_ext == ".md":
@@ -787,8 +1201,7 @@ class MorNoteGUI:
         else:
             contenuto = ""
 
-        with open(self.path, "w", encoding="utf-8") as f:
-            f.write(contenuto)
+        Logicafunz.scrivi_nota(self.path, contenuto)
 
         self.label_file.config(text=os.path.basename(path))
         self._clear_both_editors()
@@ -804,14 +1217,15 @@ class MorNoteGUI:
         self.root.after(100, self._scegli_file_dialog)
 
     def _scegli_file_dialog(self):
-        path = filedialog.askopenfilename(
-            parent=self.root,
-            title="Seleziona file",
+        path = SceltaFile.chiedi_file_apertura(
+            self.root, self._last_dir,
             filetypes=[("MorNote", "*.mnote"), ("Markdown", "*.md"),
                        ("HTML", "*.html"), ("Testo", "*.txt"), ("Tutti i file", "*.*")],
+            title="Seleziona file",
         )
         if not path: return
         self.path = path
+        self._last_dir = os.path.dirname(path) or self._last_dir
         self.file_ext = os.path.splitext(path)[1].lower()
         self.label_file.config(text=os.path.basename(path))
         if self.file_ext == ".mnote":
@@ -840,16 +1254,13 @@ class MorNoteGUI:
         if self.file_ext == ".mnote":
             left = self._serializza_editor(self.editor_left)
             right = self._serializza_editor(self.editor_right)
-            data = Logicafunz.serializza_mnote(left, right)
-            with open(self.path, "w", encoding="utf-8") as f:
-                f.write(data)
+            Logicafunz.scrivi_mnote(self.path, left, right)
             self.modified = False
             self._flash_status("File .mnote salvato.")
             return
 
         contenuto = self.editor_left.get("1.0", tk.END).rstrip("\n")
-        with open(self.path, "w", encoding="utf-8") as f:
-            f.write(contenuto)
+        Logicafunz.scrivi_nota(self.path, contenuto)
         self.modified = False
         self._flash_status("File salvato.")
 
@@ -857,15 +1268,16 @@ class MorNoteGUI:
         self.root.after(100, self._salva_con_nome_dialog)
 
     def _salva_con_nome_dialog(self):
-        path = filedialog.asksaveasfilename(
-            parent=self.root,
-            title="Salva con nome",
-            defaultextension=self.file_ext if self.file_ext else ".mnote",
+        path = SceltaFile.chiedi_file_salvataggio(
+            self.root, self._last_dir,
             filetypes=[("MorNote", "*.mnote"), ("Markdown", "*.md"),
                        ("HTML", "*.html"), ("Testo", "*.txt"), ("Tutti i file", "*.*")],
+            defaultextension=self.file_ext if self.file_ext else ".mnote",
+            title="Salva con nome",
         )
         if not path: return
         self.path = path
+        self._last_dir = os.path.dirname(path) or self._last_dir
         self.file_ext = os.path.splitext(path)[1].lower()
         self.label_file.config(text=os.path.basename(path))
         self.scrivi_nota()
@@ -919,9 +1331,10 @@ class MorNoteGUI:
                 pass
 
     def carica_mnote(self):
-        with open(self.path, "r", encoding="utf-8") as f:
-            data = f.read()
-        self._carica_mnote_da_stringa(data)
+        left, right = Logicafunz.leggi_mnote(self.path)
+        self._clear_both_editors()
+        self._applica_ranges(self.editor_left, left)
+        self._applica_ranges(self.editor_right, right)
 
     def _carica_mnote_da_stringa(self, data):
         left, right = Logicafunz.parse_mnote(data)
@@ -932,6 +1345,7 @@ class MorNoteGUI:
     def _clear_both_editors(self):
         self.editor_left.delete("1.0", tk.END)
         self.editor_right.delete("1.0", tk.END)
+        self._reset_typing_format()
 
     # ============================================================
     # COMPILAZIONE → apre nel browser come una pagina web vera
@@ -963,8 +1377,7 @@ class MorNoteGUI:
         elif self.file_ext == ".html":
             # salva su disco e apri il file vero
             contenuto = self.editor_left.get("1.0", tk.END)
-            with open(self.path, "w", encoding="utf-8") as f:
-                f.write(contenuto)
+            Logicafunz.scrivi_nota(self.path, contenuto)
             webbrowser.open(f"file://{os.path.abspath(self.path)}")
             self._flash_status("Pagina HTML aperta nel browser.")
 
