@@ -53,6 +53,20 @@ SPECIAL_CHARS = {
 
 DEFAULT_FAMILY = "Arial"
 DEFAULT_SIZE = 12
+
+# struttura per il tasto pulisci stile.
+DEFAULT_STYLE = {
+    "family":    DEFAULT_FAMILY,
+    "size":      DEFAULT_SIZE,
+    "bold":      False,
+    "italic":    False,
+    "underline": False,
+    "strike":    False,
+    "highlight": None,
+    "color":     None,
+    "align":     "align_left",
+}
+
 FONT_FAMILIES = ["Arial", "Calibri", "Times New Roman", "Courier New",
                  "Georgia", "Verdana", "Consolas", "DejaVu Sans", "DejaVu Serif"]
 FONT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 32, 40, 48]
@@ -157,16 +171,11 @@ class MorNoteGUI:
         self._last_dir = self._get_home_dir()  # cartella iniziale/ultima usata nei dialog
 
         # Formattazione "sticky": stile scelto senza selezione, che verrà
-        # applicato ai caratteri che l'utente sta per digitare.
+
         self._typing_format = {
             "bold": False, "italic": False, "underline": False, "strike": False,
             "highlight": None, "color": None, "family": None, "size": None,
         }
-        # Posizione del cursore nel momento in cui è stato impostato uno
-        # sticky format da toolbar/menu (senza selezione). Se il cursore
-        # non si è mosso da lì, un click "di rientro" nell'editor (per
-        # esempio dopo aver usato una combobox) non deve resettare lo
-        # sticky format appena scelto.
         self._sticky_anchor = None   # (editor, index) | None
 
         # massimizza
@@ -355,7 +364,7 @@ class MorNoteGUI:
         self._saved_ed  = None   # editor a cui appartiene la selezione
 
         # tasti di navigazione dopo i quali lo stile attivo va risincronizzato
-        # sul testo circostante al cursore (comportamento tipo Word)
+
         NAV_KEYSYMS = ("Left", "Right", "Up", "Down", "Home", "End", "Prior", "Next")
 
         self._last_focus = self.editor_left
@@ -438,7 +447,6 @@ class MorNoteGUI:
         resto = line_text[len(prefix):]
 
         if resto.strip() == "":
-            # riga di elenco vuota: Invio esce dall'elenco invece di continuarlo
             ed.delete(line_start, f"{line_start}+{len(prefix)}c")
             self.modified = True
             self.update_status()
@@ -488,15 +496,9 @@ class MorNoteGUI:
 
         anchor = self._sticky_anchor
         if anchor is not None and anchor[0] is ed and anchor[1] == insert_idx:
-            # Il cursore è ancora nello stesso punto in cui è stato impostato
-            # lo sticky format: questo click è solo un "rientro" nell'editor
-            # per riprendere a scrivere, non uno spostamento reale. Non
-            # sovrascrivere lo stile appena scelto dall'utente.
             return
         self._sticky_anchor = None
 
-        # Riferimento: il carattere subito a sinistra del cursore; a inizio
-        # documento (nessun carattere a sinistra) usa la posizione stessa.
         if ed.compare(insert_idx, ">", "1.0"):
             ref_idx = ed.index(f"{insert_idx} -1c")
         else:
@@ -591,9 +593,6 @@ class MorNoteGUI:
 
     # ============================================================
     # FORMATTAZIONE "STICKY" (senza selezione)
-    #   Intercetta ogni inserimento di testo nel widget (proxy Tcl) e,
-    #   se lo stile è stato attivato senza selezionare nulla, lo applica
-    #   automaticamente al testo appena digitato.
     # ============================================================
     def _setup_typing_format_proxy(self, ed):
         orig_name = ed._w + "_orig"
@@ -610,22 +609,11 @@ class MorNoteGUI:
         try:
             result = ed.tk.call((orig_name,) + args)
         except tk.TclError as e:
-            # Il widget Text invoca sé stesso internamente per moltissime
-            # operazioni di bookkeeping (es. verificare lo stato del tag
-            # "sel" quando gli indici si spostano durante un insert/delete).
-            # Normalmente Tk gestisce questi errori "benigni" senza farli
-            # risalire: qui, essendo passati dal nostro proxy Python, vanno
-            # ignorati allo stesso modo, altrimenti crashano il mainloop.
-            # Facciamo eccezione solo per un vero inserimento al cursore,
-            # dove un fallimento è un problema reale che vogliamo vedere.
+            # Il widget Text invoca sé stesso internamente per moltissime operazioni di bookkeeping (es. verificare lo stato del tag
             if is_cursor_insert:
                 raise
             return ""
 
-        # Applica lo stile sticky solo quando il testo viene digitato/incollato
-        # nella normale posizione del cursore (non per inserimenti "tecnici"
-        # come il caricamento di un file o l'inserimento di un carattere speciale
-        # in un punto arbitrario del documento).
         if is_cursor_insert:
             text = args[2]
             if text:
@@ -772,11 +760,6 @@ class MorNoteGUI:
             self._saved_ed  = None
 
     def _selection_range(self, ed):
-        # Prima prova la selezione live. Su alcune build di Tk il tag "sel"
-        # può restare presente con lunghezza zero (start == end) dopo un
-        # semplice click senza trascinamento: non è una selezione reale,
-        # quindi va trattata come "nessuna selezione" o il ramo sticky non
-        # scatterebbe mai.
         try:
             first, last = ed.index("sel.first"), ed.index("sel.last")
             if first and last and ed.compare(first, "<", last):
@@ -1085,20 +1068,64 @@ class MorNoteGUI:
         self.modified = True
 
     def clear_formatting(self):
+        """Applica la struttura DEFAULT_STYLE: riporta lo stile "sticky" ai
+        valori di base (font, dimensione, grassetto, corsivo, sottolineato,
+        barrato, colore, evidenziatore) SEMPRE, indipendentemente dal fatto
+        che ci sia una selezione. Se in più c'è del testo selezionato, la
+        stessa struttura viene applicata anche a quel testo (posizione,
+        cioè allineamento e apice/pedice compresi)."""
         ed = self.focused_editor()
         sel = self._selection_range(ed)
-        if not sel: return
-        start, end = sel
-        for t in ed.tag_names():
-            if t == "sel": continue
-            ed.tag_remove(t, start, end)
-        self.modified = True
+
+        # 1) Stile di base: sempre azzerato ai valori di DEFAULT_STYLE, con o senza selezione.
+        self._typing_format.update({
+            "bold":      DEFAULT_STYLE["bold"],
+            "italic":    DEFAULT_STYLE["italic"],
+            "underline": DEFAULT_STYLE["underline"],
+            "strike":    DEFAULT_STYLE["strike"],
+            "highlight": DEFAULT_STYLE["highlight"],
+            "color":     DEFAULT_STYLE["color"],
+            "family":    DEFAULT_STYLE["family"],
+            "size":      DEFAULT_STYLE["size"],
+        })
+        self.font_family_var.set(DEFAULT_STYLE["family"])
+        self.font_size_var.set(DEFAULT_STYLE["size"])
+        self._set_sticky_anchor(ed)
+        self._update_format_buttons()
+
+        # 2) Se c'è del testo selezionato, applica lo stesso DEFAULT_STYLE anche lì, invece di limitarsi a rimuovere tag a casaccio.
+        if sel:
+            start, end = sel
+
+            self._apply_attrs_to_range(
+                ed, start, end,
+                family=DEFAULT_STYLE["family"], size=DEFAULT_STYLE["size"],
+                bold=DEFAULT_STYLE["bold"], italic=DEFAULT_STYLE["italic"],
+            )
+
+            ed.tag_remove("underline", start, end)
+            ed.tag_remove("strike", start, end)
+
+            for t in ed.tag_names():
+                if t.startswith("hl_") or t == "highlight" or t.startswith("col_"):
+                    ed.tag_remove(t, start, end)
+
+            # posizione: apice/pedice e allineamento tornano al default
+            ed.tag_remove("superscript", start, end)
+            ed.tag_remove("subscript", start, end)
+            line_start = ed.index(f"{start} linestart")
+            line_end = ed.index(f"{end} lineend")
+            for t in ALIGN_TAGS:
+                ed.tag_remove(t, line_start, line_end)
+            ed.tag_add(DEFAULT_STYLE["align"], line_start, line_end)
+
+            self.modified = True
+            self._flash_status("Stile predefinito applicato al testo selezionato.")
+        else:
+            self._flash_status("Stile predefinito attivo per il testo che scriverai.")
 
     # ============================================================
     # ELENCHI (puntati / numerati)
-    #   Le righe vengono marcate a livello di testo con "- " (bullet,
-    #   compatibile con markdowncompiler) o "N. " (numerato), così i
-    #   file .md prodotti mantengono le liste anche fuori da MorNote.
     # ============================================================
     def _selected_line_numbers(self, ed):
         try:
@@ -1108,8 +1135,7 @@ class MorNoteGUI:
                 raise tk.TclError("nessuna selezione")
             start_line = int(start_raw.split(".")[0])
             end_line = int(end_raw.split(".")[0])
-            # Se la selezione finisce esattamente a inizio riga senza
-            # includere alcun carattere di quella riga, non la contiamo.
+
             if end_raw.split(".")[1] == "0" and end_line > start_line:
                 end_line -= 1
         except (tk.TclError, ValueError):
