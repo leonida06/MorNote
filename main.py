@@ -35,7 +35,7 @@ SPECIAL_CHARS = {
         "€", "£", "¥", "¢", "₹", "₽", "₩", "₿", "₺", "₴", "₦", "₫",
     ],
     "Punteggiatura": [
-        "«", "»", "‹", "›", "„", """, """, "'", "'", "…", "–", "—",
+        "«", "»", "‹", "›", "„", "\u201c", "\u201d", "'", "'", "…", "–", "—",
         "•", "·", "†", "‡", "§", "¶", "©", "®", "™", "℃", "℉",
     ],
     "Lettere": [
@@ -110,6 +110,7 @@ THEME_LIGHT = {
     "button_bg":      "#e0e0e0",
     "button_fg":      "#000000",
     "button_active":  "#d0d0d0",
+    "button_border":  "#000000",
     "sep_color":      "#bbbbbb",
     "paned_bg":       "#c8c8c8",
     "menu_bg":        "#f0f0f0",
@@ -131,6 +132,7 @@ THEME_DARK = {
     "button_bg":      "#3c3c3c",
     "button_fg":      "#d4d4d4",
     "button_active":  "#505050",
+    "button_border":  "#d4d4d4",
     "sep_color":      "#555555",
     "paned_bg":       "#3c3c3c",
     "menu_bg":        "#2d2d2d",
@@ -169,6 +171,7 @@ class MorNoteGUI:
         self._dark_mode = False
         self._theme_widgets = []   # lista di (widget, ruolo) da ricolorare
         self._last_dir = self._get_home_dir()  # cartella iniziale/ultima usata nei dialog
+        self._tmp_html_path = None  # ultimo file temporaneo di anteprima creato
 
         # Formattazione "sticky": stile scelto senza selezione, che verrà
 
@@ -187,6 +190,15 @@ class MorNoteGUI:
         except tk.TclError:
             self.root.geometry("1200x700")
         self.root.minsize(800, 500)
+
+        # stile ttk più morbido (pulsanti piatti, niente rilievo pesante)
+        style = ttk.Style(self.root)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+        style.configure("Soft.TButton", padding=6, relief="flat")
+        style.configure("Soft.TCombobox", padding=3)
 
         # ===== MENUBAR =====
         menubar = tk.Menu(self.root)
@@ -236,122 +248,149 @@ class MorNoteGUI:
                                         command=self.toggle_tema)
         menubar.add_cascade(label="Visualizza", menu=menu_visualizza)
 
+        menu_aiuto = tk.Menu(menubar, tearoff=0)
+        menu_aiuto.add_command(label="Scorciatoie da tastiera", command=self.mostra_scorciatoie)
+        menubar.add_cascade(label="?", menu=menu_aiuto)
+
         self.root.config(menu=menubar)
 
         # ===== TOOLBAR =====
-        toolbar = tk.Frame(self.root, bd=1, relief=tk.RAISED)
+        toolbar = tk.Frame(self.root, bd=0, relief=tk.FLAT)
         toolbar.pack(fill=tk.X)
         self._theme_widgets.append((toolbar, "toolbar_bg"))
 
         # font family
         self.font_family_var = tk.StringVar(value=DEFAULT_FAMILY)
         family_cb = ttk.Combobox(toolbar, textvariable=self.font_family_var,
-                                 values=FONT_FAMILIES, width=18, state="readonly")
-        family_cb.pack(side=tk.LEFT, padx=4, pady=3)
+                                 values=FONT_FAMILIES, width=18, state="readonly",
+                                 style="Soft.TCombobox")
+        family_cb.pack(side=tk.LEFT, padx=4, pady=4)
         family_cb.bind("<ButtonPress-1>", lambda e: self._save_selection())
         family_cb.bind("<<ComboboxSelected>>", lambda e: self.apply_font_family())
+        ToolTip(family_cb, "Famiglia del carattere")
 
         # font size
         self.font_size_var = tk.IntVar(value=DEFAULT_SIZE)
         size_cb = ttk.Combobox(toolbar, textvariable=self.font_size_var,
-                               values=FONT_SIZES, width=4, state="readonly")
-        size_cb.pack(side=tk.LEFT, padx=4, pady=3)
+                               values=FONT_SIZES, width=4, state="readonly",
+                               style="Soft.TCombobox")
+        size_cb.pack(side=tk.LEFT, padx=4, pady=4)
         size_cb.bind("<ButtonPress-1>", lambda e: self._save_selection())
         size_cb.bind("<<ComboboxSelected>>", lambda e: self.apply_font_size())
+        ToolTip(size_cb, "Dimensione del carattere")
 
         def sep():
             tk.Frame(toolbar, width=2, bg="#bbb").pack(side=tk.LEFT, fill=tk.Y, padx=4, pady=4)
 
         sep()
-        self.btn_b = tk.Button(toolbar, text="B", width=2, font=("TkDefaultFont", 10, "bold"),   command=self.bold_text)
-        self.btn_i = tk.Button(toolbar, text="I", width=2, font=("TkDefaultFont", 10, "italic"),  command=self.italic_text)
-        self.btn_u = tk.Button(toolbar, text="U", width=2, font=("TkDefaultFont", 10, "underline"), command=self.underline_text)
-        self.btn_s = tk.Button(toolbar, text="S", width=2, font=("TkDefaultFont", 10, "overstrike"), command=self.strike_text)
-        for b in (self.btn_b, self.btn_i, self.btn_u, self.btn_s):
+        self.btn_b = tk.Button(toolbar, text="B", width=2, relief=tk.FLAT, font=("TkDefaultFont", 10, "bold"),   command=self.bold_text)
+        self.btn_i = tk.Button(toolbar, text="I", width=2, relief=tk.FLAT, font=("TkDefaultFont", 10, "italic"),  command=self.italic_text)
+        self.btn_u = tk.Button(toolbar, text="U", width=2, relief=tk.FLAT, font=("TkDefaultFont", 10, "underline"), command=self.underline_text)
+        self.btn_s = tk.Button(toolbar, text="S", width=2, relief=tk.FLAT, font=("TkDefaultFont", 10, "overstrike"), command=self.strike_text)
+        for b, tip in ((self.btn_b, "Grassetto (Ctrl+B)"), (self.btn_i, "Corsivo (Ctrl+I)"),
+                       (self.btn_u, "Sottolineato (Ctrl+U)"), (self.btn_s, "Barrato")):
             b.pack(side=tk.LEFT, padx=1)
             self._theme_widgets.append((b, "button"))
+            ToolTip(b, tip)
 
         sep()
         # Evidenziatore con palette
         self._build_color_menu(toolbar, "🖍", HIGHLIGHT_PALETTE,
-                               self.apply_highlight, self.remove_highlight, "Evidenzia")
+                               self.apply_highlight, self.remove_highlight, "Evidenzia",
+                               "Evidenzia il testo selezionato")
         # Colore testo con palette
-        self._build_color_menu(toolbar, "A▾", TEXT_COLOR_PALETTE,
-                               self.apply_text_color, self.remove_text_color, "Colore testo")
+        self._build_color_menu(toolbar, "A", TEXT_COLOR_PALETTE,
+                               self.apply_text_color, self.remove_text_color, "Colore testo",
+                               "Cambia colore al testo selezionato")
 
         sep()
-        btn_bullet = tk.Button(toolbar, text="•≡", width=3, command=self.toggle_bullet_list)
-        btn_numlist = tk.Button(toolbar, text="1≡", width=3, command=self.toggle_numbered_list)
-        for b in (btn_bullet, btn_numlist):
+        btn_bullet = tk.Button(toolbar, text="•≡", width=3, relief=tk.FLAT, command=self.toggle_bullet_list)
+        btn_numlist = tk.Button(toolbar, text="1≡", width=3, relief=tk.FLAT, command=self.toggle_numbered_list)
+        for b, tip in ((btn_bullet, "Elenco puntato"), (btn_numlist, "Elenco numerato")):
             b.pack(side=tk.LEFT, padx=1)
             self._theme_widgets.append((b, "button"))
+            ToolTip(b, tip)
 
         sep()
-        btn_al = tk.Button(toolbar, text="⟸", width=2, command=lambda: self.set_align("align_left"))
-        btn_ac = tk.Button(toolbar, text="≡",  width=2, command=lambda: self.set_align("align_center"))
-        btn_ar = tk.Button(toolbar, text="⟹", width=2, command=lambda: self.set_align("align_right"))
-        for b in (btn_al, btn_ac, btn_ar):
+        btn_al = tk.Button(toolbar, text="⟸", width=2, relief=tk.FLAT, command=lambda: self.set_align("align_left"))
+        btn_ac = tk.Button(toolbar, text="≡",  width=2, relief=tk.FLAT, command=lambda: self.set_align("align_center"))
+        btn_ar = tk.Button(toolbar, text="⟹", width=2, relief=tk.FLAT, command=lambda: self.set_align("align_right"))
+        for b, tip in ((btn_al, "Allinea a sinistra"), (btn_ac, "Centra"), (btn_ar, "Allinea a destra")):
             b.pack(side=tk.LEFT, padx=1)
             self._theme_widgets.append((b, "button"))
+            ToolTip(b, tip)
 
         sep()
-        btn_pulisci = tk.Button(toolbar, text="Pulisci stile", command=self.clear_formatting)
+        btn_pulisci = tk.Button(toolbar, text="🧹", width=3, relief=tk.FLAT, command=self.clear_formatting)
         btn_pulisci.pack(side=tk.LEFT, padx=4)
         self._theme_widgets.append((btn_pulisci, "button"))
+        ToolTip(btn_pulisci, "Rimuovi formattazione")
 
         sep()
-        btn_sup = tk.Button(toolbar, text="x²", width=3, command=self.superscript_text)
-        btn_sub = tk.Button(toolbar, text="x₂", width=3, command=self.subscript_text)
-        for b in (btn_sup, btn_sub):
+        btn_sup = tk.Button(toolbar, text="x²", width=3, relief=tk.FLAT, command=self.superscript_text)
+        btn_sub = tk.Button(toolbar, text="x₂", width=3, relief=tk.FLAT, command=self.subscript_text)
+        for b, tip in ((btn_sup, "Apice"), (btn_sub, "Pedice")):
             b.pack(side=tk.LEFT, padx=1)
             self._theme_widgets.append((b, "button"))
+            ToolTip(b, tip)
 
         sep()
-        btn_special = tk.Button(toolbar, text="Ω", width=3, command=self.apri_caratteri_speciali)
+        btn_special = tk.Button(toolbar, text="Ω", width=3, relief=tk.FLAT, command=self.apri_caratteri_speciali)
         btn_special.pack(side=tk.LEFT, padx=4)
         self._theme_widgets.append((btn_special, "button"))
+        ToolTip(btn_special, "Caratteri speciali")
+
+        # ----- pulsante Info/Scorciatoie, ancorato a destra della toolbar -----
+        btn_info = tk.Button(toolbar, text="ℹ️", width=3, relief=tk.FLAT, command=self.mostra_scorciatoie)
+        btn_info.pack(side=tk.RIGHT, padx=6)
+        self._theme_widgets.append((btn_info, "button"))
+        ToolTip(btn_info, "Scorciatoie da tastiera")
 
         # selezione file + azioni
         top_frame = tk.Frame(root)
         top_frame.pack(fill=tk.X, pady=4)
         self._theme_widgets.append((top_frame, "top_frame_bg"))
-        btn_apri      = tk.Button(top_frame, text="Apri", command=self.scegli_file)
-        btn_nuovo     = tk.Button(top_frame, text="Nuovo", command=self.nuovo_file)
-        btn_salva     = tk.Button(top_frame, text="Salva", command=self.scrivi_nota)
-        btn_salva_cn  = tk.Button(top_frame, text="Salva con nome", command=self.salva_con_nome)
-        btn_anteprima = tk.Button(top_frame, text="Apri anteprima (browser)", command=self.compila_output)
-        for b in (btn_apri, btn_nuovo, btn_salva, btn_salva_cn, btn_anteprima):
+        azioni = [
+            ("🆕", "Nuovo (Ctrl+N)", self.nuovo_file),
+            ("📂", "Apri (Ctrl+O)", self.scegli_file),
+            ("💾", "Salva (Ctrl+S)", self.scrivi_nota),
+            ("💾▾", "Salva con nome (Ctrl+Shift+S)", self.salva_con_nome),
+            ("🌐", "Apri anteprima nel browser", self.compila_output),
+        ]
+        for icona, tip, comando in azioni:
+            b = tk.Button(top_frame, text=icona, relief=tk.FLAT, padx=6, command=comando)
             b.pack(side=tk.LEFT, padx=4)
             self._theme_widgets.append((b, "button"))
+            ToolTip(b, tip)
         self.label_file = tk.Label(top_frame, text="Nessun file selezionato")
         self.label_file.pack(side=tk.LEFT, padx=10)
         self._theme_widgets.append((self.label_file, "label_left_bg"))
 
         # ===== EDITOR DOPPIO =====
-        self.paned = tk.PanedWindow(root, orient=tk.HORIZONTAL, sashrelief=tk.RAISED)
+        self.paned = tk.PanedWindow(root, orient=tk.HORIZONTAL, sashrelief=tk.FLAT, sashwidth=6)
         self.paned.pack(fill=tk.BOTH, expand=True)
         self._theme_widgets.append((self.paned, "paned_bg"))
 
         left_frame = tk.Frame(self.paned)
-        self._label_left = tk.Label(left_frame, text="Storia (sinistra)", anchor="w", bg="#e8e8f0")
+        self._label_left = tk.Label(left_frame, text="Editor SX", anchor="w", bg="#e8e8f0")
         self._label_left.pack(fill=tk.X)
         self._theme_widgets.append((left_frame,        "toolbar_bg"))
         self._theme_widgets.append((self._label_left,  "label_left"))
         self.editor_left = scrolledtext.ScrolledText(
             left_frame, undo=True, wrap="word",
-            font=(DEFAULT_FAMILY, DEFAULT_SIZE)
+            font=(DEFAULT_FAMILY, DEFAULT_SIZE), relief=tk.FLAT, borderwidth=6
         )
         self.editor_left.pack(fill=tk.BOTH, expand=True)
         self.paned.add(left_frame, minsize=200)
 
         right_frame = tk.Frame(self.paned)
-        self._label_right = tk.Label(right_frame, text="Appunti partita (destra)", anchor="w", bg="#f0e8e8")
+        self._label_right = tk.Label(right_frame, text="Editor DX", anchor="w", bg="#f0e8e8")
         self._label_right.pack(fill=tk.X)
         self._theme_widgets.append((right_frame,        "toolbar_bg"))
         self._theme_widgets.append((self._label_right,  "label_right"))
         self.editor_right = scrolledtext.ScrolledText(
             right_frame, undo=True, wrap="word",
-            font=(DEFAULT_FAMILY, DEFAULT_SIZE)
+            font=(DEFAULT_FAMILY, DEFAULT_SIZE), relief=tk.FLAT, borderwidth=6
         )
         self.editor_right.pack(fill=tk.BOTH, expand=True)
         self.paned.add(right_frame, minsize=200)
@@ -384,13 +423,29 @@ class MorNoteGUI:
         self._theme_widgets.append((self.status, "status"))
 
         Scorciatoie.bind_shortcuts(self.root, self.editor_left, self.editor_right, self)
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.toggle_tema()  # applica subito i colori/bordi del tema chiaro di default
         self.update_status()
+
+    def _on_close(self):
+        """Ripulisce l'eventuale file temporaneo di anteprima rimasto in
+        /tmp prima di chiudere l'app (vedi compila_output)."""
+        self._rimuovi_tmp_html()
+        self.root.destroy()
+
+    def _rimuovi_tmp_html(self):
+        if self._tmp_html_path:
+            try:
+                os.remove(self._tmp_html_path)
+            except OSError:
+                pass
+            self._tmp_html_path = None
 
     # ============================================================
     # Toolbar: menu colori
     # ============================================================
-    def _build_color_menu(self, parent, label, palette, on_pick, on_clear, title):
-        mb = tk.Menubutton(parent, text=label, relief=tk.RAISED, padx=4)
+    def _build_color_menu(self, parent, label, palette, on_pick, on_clear, title, tip=None):
+        mb = tk.Menubutton(parent, text=label, relief=tk.FLAT, padx=4)
         menu = tk.Menu(mb, tearoff=0)
         menu.add_command(label=title, state="disabled")
         menu.add_separator()
@@ -404,6 +459,10 @@ class MorNoteGUI:
         menu.add_command(label="Rimuovi", command=on_clear)
         mb.config(menu=menu)
         mb.pack(side=tk.LEFT, padx=2)
+        self._theme_widgets.append((mb, "button"))
+        if tip:
+            ToolTip(mb, tip)
+        return mb
 
     def _pick_custom_color(self, on_pick, title):
         c = colorchooser.askcolor(title=title)
@@ -553,7 +612,10 @@ class MorNoteGUI:
                 elif role == "button":
                     widget.configure(bg=t["button_bg"], fg=t["button_fg"],
                                      activebackground=t["button_active"],
-                                     activeforeground=t["button_fg"])
+                                     activeforeground=t["button_fg"],
+                                     highlightbackground=t["button_border"],
+                                     highlightcolor=t["button_border"],
+                                     highlightthickness=1)
                 elif role == "label_left":
                     widget.configure(bg=t["label_left_bg"], fg=t["label_fg"])
                 elif role == "label_right":
@@ -663,7 +725,7 @@ class MorNoteGUI:
             if btn is None:
                 continue
             try:
-                btn.configure(relief=tk.SUNKEN if self._typing_format.get(key) else tk.RAISED)
+                btn.configure(relief=tk.SUNKEN if self._typing_format.get(key) else tk.FLAT)
             except tk.TclError:
                 pass
 
@@ -878,10 +940,14 @@ class MorNoteGUI:
         if not sel: return
         start, end = sel
 
+        # Nota: il conteggio dei caratteri va fatto con ed.count() e non
+        # facendo aritmetica sugli indici "riga.colonna" convertiti a float
+        # (bug precedente: "1.10" interpretato come 1.10 = 1.1 dava un
+        # conteggio sbagliato). Vedi anche subscript_text.
+        n_char = ed.count(start, end, "chars")[0]
         all_super = all(
-            "superscript" in ed.tag_names(ed.index(f"{start}+{i}c"))
-            for i in range(int(float(ed.index(end))) - int(float(ed.index(start))) + 1)
-            if ed.compare(f"{start}+{i}c", "<", end)
+            "superscript" in ed.tag_names(f"{start}+{i}c")
+            for i in range(n_char)
         )
 
         if all_super:
@@ -898,19 +964,19 @@ class MorNoteGUI:
         sel = self._selection_range(ed)
         if not sel: return
         start, end = sel
-    
+
+        n_char = ed.count(start, end, "chars")[0]
         all_sub = all(
-            "subscript" in ed.tag_names(ed.index(f"{start}+{i}c"))
-            for i in range(int(float(ed.index(end))) - int(float(ed.index(start))) + 1)
-            if ed.compare(f"{start}+{i}c", "<", end)
+            "subscript" in ed.tag_names(f"{start}+{i}c")
+            for i in range(n_char)
         )
-    
+
         if all_sub:
             ed.tag_remove("subscript", start, end)
         else:
             ed.tag_remove("superscript", start, end)
             ed.tag_add("subscript", start, end)
-    
+
         self.modified = True
 
 
@@ -983,6 +1049,63 @@ class MorNoteGUI:
                 ).pack(side=tk.LEFT, padx=2)
 
         cerca_var.trace_add("write", aggiorna_ricerca)
+
+    # ============================================================
+    # INFO / SCORCIATOIE
+    # ============================================================
+    def mostra_scorciatoie(self):
+        """Finestra con l'elenco di tutte le scorciatoie da tastiera
+        (vedi Scorciatoie.py per i bind effettivi)."""
+        win = tk.Toplevel(self.root)
+        win.title("Scorciatoie da tastiera")
+        win.resizable(False, False)
+        win.transient(self.root)
+
+        t = THEME_DARK if self._dark_mode else THEME_LIGHT
+        win.configure(bg=t["root_bg"])
+
+        gruppi = [
+            ("File", [
+                ("Ctrl+N", "Nuovo file"),
+                ("Ctrl+O", "Apri file"),
+                ("Ctrl+S", "Salva"),
+                ("Ctrl+Shift+S", "Salva con nome"),
+            ]),
+            ("Modifica", [
+                ("Ctrl+C", "Copia"),
+                ("Ctrl+V", "Incolla"),
+                ("Ctrl+X", "Taglia"),
+                ("Ctrl+Z", "Annulla"),
+                ("Ctrl+Y", "Ripeti"),
+                ("Ctrl+F", "Cerca"),
+                ("Ctrl+Shift+O", "Caratteri speciali"),
+            ]),
+            ("Formattazione", [
+                ("Ctrl+B", "Grassetto"),
+                ("Ctrl+I", "Corsivo"),
+                ("Ctrl+U", "Sottolineato"),
+                ("Ctrl+H", "Evidenzia"),
+                ("Ctrl+Shift+P", "Rimuovi formattazione"),
+                ("Ctrl+Shift+↑", "Apice (superscript)"),
+                ("Ctrl+Shift+↓", "Pedice (subscript)"),
+            ]),
+        ]
+
+        cont = tk.Frame(win, bg=t["root_bg"])
+        cont.pack(padx=16, pady=12)
+
+        for titolo, righe in gruppi:
+            tk.Label(cont, text=titolo, bg=t["root_bg"], fg=t["label_fg"],
+                     font=("TkDefaultFont", 10, "bold")).pack(anchor="w", pady=(8, 2))
+            for tasto, descr in righe:
+                riga = tk.Frame(cont, bg=t["root_bg"])
+                riga.pack(fill=tk.X)
+                tk.Label(riga, text=tasto, width=16, anchor="w", bg=t["root_bg"],
+                         fg=t["label_fg"], font=("TkFixedFont", 9)).pack(side=tk.LEFT)
+                tk.Label(riga, text=descr, anchor="w", bg=t["root_bg"],
+                         fg=t["label_fg"]).pack(side=tk.LEFT)
+
+        tk.Button(win, text="Chiudi", relief=tk.FLAT, command=win.destroy).pack(pady=(4, 12))
 
     # ----- highlight color personalizzato -----
     def apply_highlight(self, color):
@@ -1382,6 +1505,11 @@ class MorNoteGUI:
                 "L'anteprima nel browser è disponibile solo per file .md o .html.")
             return
 
+        # Il vecchio file temporaneo (se presente) va ripulito PRIMA di
+        # crearne uno nuovo, non alla chiusura dell'app: altrimenti ogni
+        # anteprima aggiunge un .html orfano in /tmp (bug segnalato prima).
+        self._rimuovi_tmp_html()
+
         if self.file_ext == ".md":
             testo = self.editor_left.get("1.0", tk.END)
             tmp_md = tempfile.NamedTemporaryFile(
@@ -1397,6 +1525,7 @@ class MorNoteGUI:
             tmp_html = tempfile.NamedTemporaryFile(
                 mode="w", encoding="utf-8", suffix=".html", delete=False)
             tmp_html.write(html_doc); tmp_html.close()
+            self._tmp_html_path = tmp_html.name
             webbrowser.open(f"file://{os.path.abspath(tmp_html.name)}")
             self._flash_status("Anteprima aperta nel browser.")
 
@@ -1480,8 +1609,66 @@ class MorNoteGUI:
         entry.bind("<Return>", lambda e: cerca())
 
 
+class ToolTip:
+    """Tooltip minimale in puro Tkinter (nessuna dipendenza esterna): mostra
+    una piccola etichetta gialla vicino al puntatore dopo un breve indugio
+    sul widget, per suggerire cosa fa un pulsante-icona senza dover leggere
+    una scritta permanente in barra."""
+
+    _RITARDO_MS = 500
+
+    def __init__(self, widget, testo):
+        self.widget = widget
+        self.testo = testo
+        self._after_id = None
+        self._finestra = None
+        widget.bind("<Enter>", self._pianifica, add="+")
+        widget.bind("<Leave>", self._nascondi, add="+")
+        widget.bind("<ButtonPress>", self._nascondi, add="+")
+
+    def _pianifica(self, _event=None):
+        self._annulla()
+        self._after_id = self.widget.after(self._RITARDO_MS, self._mostra)
+
+    def _annulla(self):
+        if self._after_id is not None:
+            try:
+                self.widget.after_cancel(self._after_id)
+            except tk.TclError:
+                pass
+            self._after_id = None
+
+    def _mostra(self):
+        if self._finestra is not None:
+            return
+        try:
+            x = self.widget.winfo_rootx() + 12
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+        except tk.TclError:
+            return
+        self._finestra = tk.Toplevel(self.widget)
+        self._finestra.wm_overrideredirect(True)
+        self._finestra.wm_geometry(f"+{x}+{y}")
+        tk.Label(
+            self._finestra, text=self.testo, justify=tk.LEFT,
+            background="#ffffe0", foreground="#333333",
+            relief=tk.SOLID, borderwidth=1, font=("TkDefaultFont", 9),
+            padx=6, pady=2,
+        ).pack()
+
+    def _nascondi(self, _event=None):
+        self._annulla()
+        if self._finestra is not None:
+            self._finestra.destroy()
+            self._finestra = None
+
+
 if __name__ == "__main__":
     root = tk.Tk()
-    root.iconphoto(True, tk.PhotoImage(file = "logo.png"))
+    logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png")
+    try:
+        root.iconphoto(True, tk.PhotoImage(file=logo_path))
+    except tk.TclError:
+        pass
     app = MorNoteGUI(root)
     root.mainloop()
