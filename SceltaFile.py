@@ -24,6 +24,9 @@ class _FileDialog(tk.Toplevel):
         self.result = None
         self.current_dir = initialdir if initialdir and os.path.isdir(initialdir) else os.path.expanduser("~")
         self._voci_correnti = []
+        # Indice dell'ultima voce scelta. Serve come rete di sicurezza: vedi
+        # _voce_selezionata() e la nota su exportselection più sotto.
+        self._ultima_sel = None
 
         # ---- barra percorso ----
         top = tk.Frame(self)
@@ -40,7 +43,15 @@ class _FileDialog(tk.Toplevel):
         list_frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=(0, 6))
         scrollbar = tk.Scrollbar(list_frame)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set, activestyle="none")
+        # exportselection=False è ESSENZIALE: con il valore predefinito (True) la
+        # selezione della Listbox è legata alla selezione PRIMARY di X11, quindi
+        # appena un altro widget la prende (un click nella barra del percorso, o
+        # del testo selezionato negli editor della finestra principale) la riga
+        # evidenziata qui viene azzerata di nascosto. Il risultato era che
+        # curselection() tornava vuota, _conferma() usciva subito e il file non
+        # veniva mai aperto: l'app sembrava mostrare un documento vuoto.
+        self.listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set,
+                                  activestyle="none", exportselection=False)
         self.listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.config(command=self.listbox.yview)
         self.listbox.bind("<<ListboxSelect>>", self._on_select)
@@ -114,6 +125,7 @@ class _FileDialog(tk.Toplevel):
             elif estensioni is None or os.path.splitext(v)[1].lower() in estensioni:
                 file_validi.append(v)
 
+        self._ultima_sel = None   # cambiata cartella: la vecchia scelta non vale più
         self._voci_correnti = []
         for c in cartelle:
             self.listbox.insert(tk.END, f"\U0001F4C1  {c}")
@@ -134,19 +146,31 @@ class _FileDialog(tk.Toplevel):
             self.current_dir = p
             self._aggiorna_lista()
 
+    def _voce_selezionata(self):
+        """Ritorna (nome, is_dir) della voce scelta, oppure None.
+        Prova prima la selezione attuale della Listbox e, se questa risulta
+        vuota, ricade sull'ultimo indice scelto dall'utente: così un click
+        altrove non fa 'dimenticare' al dialogo quale file era stato scelto."""
+        sel = self.listbox.curselection()
+        idx = sel[0] if sel else self._ultima_sel
+        if idx is None or idx >= len(self._voci_correnti):
+            return None
+        return self._voci_correnti[idx]
+
     def _on_select(self, event=None):
         sel = self.listbox.curselection()
         if not sel:
             return
+        self._ultima_sel = sel[0]
         nome, is_dir = self._voci_correnti[sel[0]]
         if not is_dir and self.mode == "save":
             self.filename_var.set(nome)
 
     def _on_double_click(self, event=None):
-        sel = self.listbox.curselection()
-        if not sel:
+        voce = self._voce_selezionata()
+        if voce is None:
             return
-        nome, is_dir = self._voci_correnti[sel[0]]
+        nome, is_dir = voce
         if is_dir:
             self.current_dir = os.path.join(self.current_dir, nome)
             self._aggiorna_lista()
@@ -165,10 +189,17 @@ class _FileDialog(tk.Toplevel):
             self._annulla_grab_e_chiudi()
             return
 
-        sel = self.listbox.curselection()
-        if not sel:
+        voce = self._voce_selezionata()
+        if voce is None:
+            # Nessuna riga scelta: se nella barra del percorso c'è un file
+            # valido, apri quello invece di non fare assolutamente nulla
+            # (prima il pulsante "Apri" sembrava semplicemente non rispondere).
+            p = os.path.expanduser(self.path_var.get().strip())
+            if os.path.isfile(p):
+                self.result = p
+                self._annulla_grab_e_chiudi()
             return
-        nome, is_dir = self._voci_correnti[sel[0]]
+        nome, is_dir = voce
         if is_dir:
             self.current_dir = os.path.join(self.current_dir, nome)
             self._aggiorna_lista()
