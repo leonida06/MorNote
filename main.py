@@ -934,6 +934,27 @@ class MorNoteGUI:
     def underline_text(self): self._toggle_simple("underline")
     def strike_text(self):    self._toggle_simple("strike")
 
+    def highlight_text(self):
+        """Evidenziatore con il giallo predefinito, in toggle.
+        Scorciatoie.py associa Ctrl+H a questo metodo: prima non esisteva e
+        premere Ctrl+H sollevava AttributeError."""
+        ed = self.focused_editor()
+        sel = self._selection_range(ed)
+        giallo = "#fff59d"
+
+        if sel:
+            start, _end = sel
+            gia_evidenziato = any(
+                t.startswith("hl_") or t == "highlight" for t in ed.tag_names(start)
+            )
+            self.remove_highlight() if gia_evidenziato else self.apply_highlight(giallo)
+            return
+
+        if self._typing_format["highlight"]:
+            self.remove_highlight()
+        else:
+            self.apply_highlight(giallo)
+
     def superscript_text(self):
         ed = self.focused_editor()
         sel = self._selection_range(ed)
